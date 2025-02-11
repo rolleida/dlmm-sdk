@@ -1,5 +1,5 @@
 use anchor_client::solana_sdk::pubkey::Pubkey;
-use anyhow::{ensure, Context, Result};
+use anyhow::{ensure, Context, Result, anyhow};
 use lb_clmm::{
     pair_action_access::ActivationType,
     state::{
@@ -157,6 +157,7 @@ pub fn quote_exact_in(
     let mut total_amount_out: u64 = 0;
     let mut total_fee: u64 = 0;
 
+    let mut previous_active_bin_array_pubkey: Option<Pubkey> = None;
     while amount_in > 0 {
         let active_bin_array_pubkey = get_bin_array_pubkeys_for_swap(
             lb_pair_pubkey,
@@ -167,6 +168,13 @@ pub fn quote_exact_in(
         )?
         .pop()
         .context("Pool out of liquidity")?;
+
+        if let Some(previous_active_bin_array_pubkey) = previous_active_bin_array_pubkey {
+            if previous_active_bin_array_pubkey == active_bin_array_pubkey {
+                return Err(anyhow!("Active bin array is stuck!"));
+            }
+        }
+        previous_active_bin_array_pubkey = Some(active_bin_array_pubkey);
 
         let mut active_bin_array = bin_arrays
             .get(&active_bin_array_pubkey)
