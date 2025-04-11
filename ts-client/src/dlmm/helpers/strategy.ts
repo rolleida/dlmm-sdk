@@ -1,5 +1,5 @@
 import { BN } from "@coral-xyz/anchor";
-import { StrategyType, StrategyParameters } from "../types";
+import { StrategyType, StrategyParameters, Clock } from "../types";
 import {
   autoFillXByWeight,
   autoFillYByWeight,
@@ -7,7 +7,8 @@ import {
   toAmountBidSide,
   toAmountBothSide,
 } from "./weightToAmounts";
-import Decimal from "decimal.js";
+import { Mint } from "@solana/spl-token";
+
 const DEFAULT_MAX_WEIGHT = 2000;
 const DEFAULT_MIN_WEIGHT = 200;
 
@@ -146,56 +147,22 @@ function toWeightBidAsk(
   return distributions;
 }
 
-export function toAmountsOneSideByStrategy(
-  activeId: number,
-  binStep: number,
-  minBinId: number,
-  maxBinId: number,
-  amount: BN,
-  strategyType: StrategyType,
-  depositForY: boolean
-): {
-  binId: number;
-  amount: BN;
-}[] {
-  let weights = [];
-  switch (strategyType) {
-    case StrategyType.SpotBalanced:
-    case StrategyType.CurveBalanced:
-    case StrategyType.BidAskBalanced:
-    case StrategyType.SpotImBalanced:
-    case StrategyType.CurveImBalanced:
-    case StrategyType.BidAskImBalanced: {
-      throw "Invalid Strategy Parameters";
-    }
-    case StrategyType.SpotOneSide: {
-      weights = toWeightSpotBalanced(minBinId, maxBinId);
-      break;
-    }
-    case StrategyType.CurveOneSide: {
-      if (depositForY) {
-        weights = toWeightAscendingOrder(minBinId, maxBinId);
-      } else {
-        weights = toWeightDecendingOrder(minBinId, maxBinId);
-      }
-      break;
-    }
-    case StrategyType.BidAskOneSide: {
-      if (depositForY) {
-        weights = toWeightDecendingOrder(minBinId, maxBinId);
-      } else {
-        weights = toWeightAscendingOrder(minBinId, maxBinId);
-      }
-      break;
-    }
-  }
-  if (depositForY) {
-    return toAmountBidSide(activeId, amount, weights);
-  } else {
-    return toAmountAskSide(activeId, binStep, amount, weights);
-  }
-}
-
+/**
+ * Given a strategy type and amounts of X and Y, returns the distribution of liquidity.
+ * @param activeId The bin id of the active bin.
+ * @param binStep The step size of each bin.
+ * @param minBinId The min bin id.
+ * @param maxBinId The max bin id.
+ * @param amountX The amount of X token to deposit.
+ * @param amountY The amount of Y token to deposit.
+ * @param amountXInActiveBin The amount of X token in the active bin.
+ * @param amountYInActiveBin The amount of Y token in the active bin.
+ * @param strategyType The strategy type.
+ * @param mintX The mint info of X token. Get from DLMM instance.
+ * @param mintY The mint info of Y token. Get from DLMM instance.
+ * @param clock The clock info. Get from DLMM instance.
+ * @returns The distribution of liquidity.
+ */
 export function toAmountsBothSideByStrategy(
   activeId: number,
   binStep: number,
@@ -205,7 +172,10 @@ export function toAmountsBothSideByStrategy(
   amountY: BN,
   amountXInActiveBin: BN,
   amountYInActiveBin: BN,
-  strategyType: StrategyType
+  strategyType: StrategyType,
+  mintX: Mint,
+  mintY: Mint,
+  clock: Clock
 ): {
   binId: number;
   amountX: BN;
@@ -213,12 +183,7 @@ export function toAmountsBothSideByStrategy(
 }[] {
   const isSingleSideX = amountY.isZero();
   switch (strategyType) {
-    case StrategyType.SpotOneSide:
-    case StrategyType.CurveOneSide:
-    case StrategyType.BidAskOneSide: {
-      throw "Invalid Strategy Parameters";
-    }
-    case StrategyType.SpotImBalanced: {
+    case StrategyType.Spot: {
       if (activeId < minBinId || activeId > maxBinId) {
         const weights = toWeightSpotBalanced(minBinId, maxBinId);
         return toAmountBothSide(
@@ -228,14 +193,23 @@ export function toAmountsBothSideByStrategy(
           amountY,
           amountXInActiveBin,
           amountYInActiveBin,
-          weights
+          weights,
+          mintX,
+          mintY,
+          clock
         );
       }
       const amountsInBin = [];
       if (!isSingleSideX) {
         if (minBinId <= activeId) {
           const weights = toWeightSpotBalanced(minBinId, activeId);
-          const amounts = toAmountBidSide(activeId, amountY, weights);
+          const amounts = toAmountBidSide(
+            activeId,
+            amountY,
+            weights,
+            mintY,
+            clock
+          );
 
           for (let bin of amounts) {
             amountsInBin.push({
@@ -247,7 +221,14 @@ export function toAmountsBothSideByStrategy(
         }
         if (activeId < maxBinId) {
           const weights = toWeightSpotBalanced(activeId + 1, maxBinId);
-          const amounts = toAmountAskSide(activeId, binStep, amountX, weights);
+          const amounts = toAmountAskSide(
+            activeId,
+            binStep,
+            amountX,
+            weights,
+            mintX,
+            clock
+          );
           for (let bin of amounts) {
             amountsInBin.push({
               binId: bin.binId,
@@ -262,7 +243,9 @@ export function toAmountsBothSideByStrategy(
           const amountsIntoBidSide = toAmountBidSide(
             activeId,
             amountY,
-            weights
+            weights,
+            mintY,
+            clock
           );
           for (let bin of amountsIntoBidSide) {
             amountsInBin.push({
@@ -278,7 +261,9 @@ export function toAmountsBothSideByStrategy(
             activeId,
             binStep,
             amountX,
-            weights
+            weights,
+            mintX,
+            clock
           );
           for (let bin of amountsIntoAskSide) {
             amountsInBin.push({
@@ -291,7 +276,7 @@ export function toAmountsBothSideByStrategy(
       }
       return amountsInBin;
     }
-    case StrategyType.CurveImBalanced: {
+    case StrategyType.Curve: {
       // ask side
       if (activeId < minBinId) {
         let weights = toWeightDecendingOrder(minBinId, maxBinId);
@@ -302,7 +287,10 @@ export function toAmountsBothSideByStrategy(
           amountY,
           amountXInActiveBin,
           amountYInActiveBin,
-          weights
+          weights,
+          mintX,
+          mintY,
+          clock
         );
       }
       // bid side
@@ -315,14 +303,23 @@ export function toAmountsBothSideByStrategy(
           amountY,
           amountXInActiveBin,
           amountYInActiveBin,
-          weights
+          weights,
+          mintX,
+          mintY,
+          clock
         );
       }
       const amountsInBin = [];
       if (!isSingleSideX) {
         if (minBinId <= activeId) {
           const weights = toWeightAscendingOrder(minBinId, activeId);
-          const amounts = toAmountBidSide(activeId, amountY, weights);
+          const amounts = toAmountBidSide(
+            activeId,
+            amountY,
+            weights,
+            mintY,
+            clock
+          );
 
           for (let bin of amounts) {
             amountsInBin.push({
@@ -334,7 +331,14 @@ export function toAmountsBothSideByStrategy(
         }
         if (activeId < maxBinId) {
           const weights = toWeightDecendingOrder(activeId + 1, maxBinId);
-          const amounts = toAmountAskSide(activeId, binStep, amountX, weights);
+          const amounts = toAmountAskSide(
+            activeId,
+            binStep,
+            amountX,
+            weights,
+            mintX,
+            clock
+          );
           for (let bin of amounts) {
             amountsInBin.push({
               binId: bin.binId,
@@ -349,7 +353,9 @@ export function toAmountsBothSideByStrategy(
           const amountsIntoBidSide = toAmountBidSide(
             activeId,
             amountY,
-            weights
+            weights,
+            mintY,
+            clock
           );
           for (let bin of amountsIntoBidSide) {
             amountsInBin.push({
@@ -365,7 +371,9 @@ export function toAmountsBothSideByStrategy(
             activeId,
             binStep,
             amountX,
-            weights
+            weights,
+            mintX,
+            clock
           );
           for (let bin of amountsIntoAskSide) {
             amountsInBin.push({
@@ -378,7 +386,7 @@ export function toAmountsBothSideByStrategy(
       }
       return amountsInBin;
     }
-    case StrategyType.BidAskImBalanced: {
+    case StrategyType.BidAsk: {
       // ask side
       if (activeId < minBinId) {
         const weights = toWeightAscendingOrder(minBinId, maxBinId);
@@ -389,7 +397,10 @@ export function toAmountsBothSideByStrategy(
           amountY,
           amountXInActiveBin,
           amountYInActiveBin,
-          weights
+          weights,
+          mintX,
+          mintY,
+          clock
         );
       }
       // bid side
@@ -402,14 +413,23 @@ export function toAmountsBothSideByStrategy(
           amountY,
           amountXInActiveBin,
           amountYInActiveBin,
-          weights
+          weights,
+          mintX,
+          mintY,
+          clock
         );
       }
       const amountsInBin = [];
       if (!isSingleSideX) {
         if (minBinId <= activeId) {
           const weights = toWeightDecendingOrder(minBinId, activeId);
-          const amounts = toAmountBidSide(activeId, amountY, weights);
+          const amounts = toAmountBidSide(
+            activeId,
+            amountY,
+            weights,
+            mintY,
+            clock
+          );
 
           for (let bin of amounts) {
             amountsInBin.push({
@@ -421,7 +441,14 @@ export function toAmountsBothSideByStrategy(
         }
         if (activeId < maxBinId) {
           const weights = toWeightAscendingOrder(activeId + 1, maxBinId);
-          const amounts = toAmountAskSide(activeId, binStep, amountX, weights);
+          const amounts = toAmountAskSide(
+            activeId,
+            binStep,
+            amountX,
+            weights,
+            mintX,
+            clock
+          );
           for (let bin of amounts) {
             amountsInBin.push({
               binId: bin.binId,
@@ -436,7 +463,9 @@ export function toAmountsBothSideByStrategy(
           const amountsIntoBidSide = toAmountBidSide(
             activeId,
             amountY,
-            weights
+            weights,
+            mintY,
+            clock
           );
           for (let bin of amountsIntoBidSide) {
             amountsInBin.push({
@@ -452,7 +481,9 @@ export function toAmountsBothSideByStrategy(
             activeId,
             binStep,
             amountX,
-            weights
+            weights,
+            mintX,
+            clock
           );
           for (let bin of amountsIntoAskSide) {
             amountsInBin.push({
@@ -465,7 +496,7 @@ export function toAmountsBothSideByStrategy(
       }
       return amountsInBin;
     }
-    case StrategyType.SpotBalanced: {
+    case StrategyType.Spot: {
       let weights = toWeightSpotBalanced(minBinId, maxBinId);
       return toAmountBothSide(
         activeId,
@@ -474,10 +505,13 @@ export function toAmountsBothSideByStrategy(
         amountY,
         amountXInActiveBin,
         amountYInActiveBin,
-        weights
+        weights,
+        mintX,
+        mintY,
+        clock
       );
     }
-    case StrategyType.CurveBalanced: {
+    case StrategyType.Curve: {
       let weights = toWeightCurve(minBinId, maxBinId, activeId);
       return toAmountBothSide(
         activeId,
@@ -486,10 +520,13 @@ export function toAmountsBothSideByStrategy(
         amountY,
         amountXInActiveBin,
         amountYInActiveBin,
-        weights
+        weights,
+        mintX,
+        mintY,
+        clock
       );
     }
-    case StrategyType.BidAskBalanced: {
+    case StrategyType.BidAsk: {
       let weights = toWeightBidAsk(minBinId, maxBinId, activeId);
       return toAmountBothSide(
         activeId,
@@ -498,7 +535,10 @@ export function toAmountsBothSideByStrategy(
         amountY,
         amountXInActiveBin,
         amountYInActiveBin,
-        weights
+        weights,
+        mintX,
+        mintY,
+        clock
       );
     }
   }
@@ -516,16 +556,7 @@ export function autoFillYByStrategy(
   strategyType: StrategyType
 ): BN {
   switch (strategyType) {
-    case StrategyType.SpotOneSide:
-    case StrategyType.CurveOneSide:
-    case StrategyType.BidAskOneSide:
-
-    case StrategyType.SpotImBalanced:
-    case StrategyType.CurveImBalanced:
-    case StrategyType.BidAskImBalanced: {
-      throw "Invalid Strategy Parameters";
-    }
-    case StrategyType.SpotBalanced: {
+    case StrategyType.Spot: {
       let weights = toWeightSpotBalanced(minBinId, maxBinId);
       return autoFillYByWeight(
         activeId,
@@ -536,7 +567,7 @@ export function autoFillYByStrategy(
         weights
       );
     }
-    case StrategyType.CurveBalanced: {
+    case StrategyType.Curve: {
       let weights = toWeightCurve(minBinId, maxBinId, activeId);
       return autoFillYByWeight(
         activeId,
@@ -547,7 +578,7 @@ export function autoFillYByStrategy(
         weights
       );
     }
-    case StrategyType.BidAskBalanced: {
+    case StrategyType.BidAsk: {
       let weights = toWeightBidAsk(minBinId, maxBinId, activeId);
       return autoFillYByWeight(
         activeId,
@@ -573,16 +604,7 @@ export function autoFillXByStrategy(
   strategyType: StrategyType
 ): BN {
   switch (strategyType) {
-    case StrategyType.SpotOneSide:
-    case StrategyType.CurveOneSide:
-    case StrategyType.BidAskOneSide:
-
-    case StrategyType.SpotImBalanced:
-    case StrategyType.CurveImBalanced:
-    case StrategyType.BidAskImBalanced: {
-      throw "Invalid Strategy Parameters";
-    }
-    case StrategyType.SpotBalanced: {
+    case StrategyType.Spot: {
       let weights = toWeightSpotBalanced(minBinId, maxBinId);
       return autoFillXByWeight(
         activeId,
@@ -593,7 +615,7 @@ export function autoFillXByStrategy(
         weights
       );
     }
-    case StrategyType.CurveBalanced: {
+    case StrategyType.Curve: {
       let weights = toWeightCurve(minBinId, maxBinId, activeId);
       return autoFillXByWeight(
         activeId,
@@ -604,7 +626,7 @@ export function autoFillXByStrategy(
         weights
       );
     }
-    case StrategyType.BidAskBalanced: {
+    case StrategyType.BidAsk: {
       let weights = toWeightBidAsk(minBinId, maxBinId, activeId);
       return autoFillXByWeight(
         activeId,
@@ -627,56 +649,7 @@ export function toStrategyParameters({
 }: StrategyParameters) {
   const parameters = [singleSidedX ? 1 : 0, ...new Array<number>(63).fill(0)];
   switch (strategyType) {
-    case StrategyType.SpotOneSide: {
-      return {
-        minBinId,
-        maxBinId,
-        strategyType: { spotOneSide: {} },
-        parameteres: Buffer.from(parameters).toJSON().data,
-      };
-    }
-    case StrategyType.CurveOneSide: {
-      return {
-        minBinId,
-        maxBinId,
-        strategyType: { curveOneSide: {} },
-        parameteres: Buffer.from(parameters).toJSON().data,
-      };
-    }
-    case StrategyType.BidAskOneSide: {
-      return {
-        minBinId,
-        maxBinId,
-        strategyType: { bidAskOneSide: {} },
-        parameteres: Buffer.from(parameters).toJSON().data,
-      };
-    }
-    case StrategyType.SpotBalanced: {
-      return {
-        minBinId,
-        maxBinId,
-        strategyType: { spotBalanced: {} },
-        parameteres: Buffer.from(parameters).toJSON().data,
-      };
-    }
-    case StrategyType.CurveBalanced: {
-      return {
-        minBinId,
-        maxBinId,
-        strategyType: { curveBalanced: {} },
-        parameteres: Buffer.from(parameters).toJSON().data,
-      };
-    }
-    case StrategyType.BidAskBalanced: {
-      return {
-        minBinId,
-        maxBinId,
-        strategyType: { bidAskBalanced: {} },
-        parameteres: Buffer.from(parameters).toJSON().data,
-      };
-    }
-
-    case StrategyType.SpotImBalanced: {
+    case StrategyType.Spot: {
       return {
         minBinId,
         maxBinId,
@@ -684,7 +657,7 @@ export function toStrategyParameters({
         parameteres: Buffer.from(parameters).toJSON().data,
       };
     }
-    case StrategyType.CurveImBalanced: {
+    case StrategyType.Curve: {
       return {
         minBinId,
         maxBinId,
@@ -692,7 +665,7 @@ export function toStrategyParameters({
         parameteres: Buffer.from(parameters).toJSON().data,
       };
     }
-    case StrategyType.BidAskImBalanced: {
+    case StrategyType.BidAsk: {
       return {
         minBinId,
         maxBinId,

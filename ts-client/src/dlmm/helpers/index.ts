@@ -1,10 +1,11 @@
 import { BN, EventParser } from "@coral-xyz/anchor";
 import {
+  ASSOCIATED_TOKEN_PROGRAM_ID,
   NATIVE_MINT,
   TOKEN_PROGRAM_ID,
   TokenAccountNotFoundError,
   TokenInvalidAccountOwnerError,
-  createAssociatedTokenAccountInstruction,
+  createAssociatedTokenAccountIdempotentInstruction,
   createCloseAccountInstruction,
   getAccount,
   getAssociatedTokenAddressSync,
@@ -20,8 +21,7 @@ import {
 } from "@solana/web3.js";
 import { Bin, ClmmProgram, GetOrCreateATAResponse } from "../types";
 import { Rounding, mulShr, shlDiv } from "./math";
-import { getSimulationComputeUnits } from "@solana-developers/helpers";
-import { MAX_CU_BUFFER, MIN_CU_BUFFER } from "./computeUnit";
+import { getSimulationComputeUnits, MAX_CU_BUFFER, MIN_CU_BUFFER } from "./computeUnit";
 
 export * from "./derive";
 export * from "./binArray";
@@ -37,11 +37,7 @@ export function chunks<T>(array: T[], size: number): T[][] {
   );
 }
 
-export function range<T>(
-  min: number,
-  max: number,
-  mapfn: (i: number) => T
-) {
+export function range<T>(min: number, max: number, mapfn: (i: number) => T) {
   const length = max - min + 1;
   return Array.from({ length }, (_, i) => mapfn(min + i));
 }
@@ -93,17 +89,21 @@ export const getOrCreateATAInstruction = async (
   connection: Connection,
   tokenMint: PublicKey,
   owner: PublicKey,
+  programId?: PublicKey,
   payer: PublicKey = owner,
   allowOwnerOffCurve = true
 ): Promise<GetOrCreateATAResponse> => {
+  programId = programId ?? TOKEN_PROGRAM_ID;
   const toAccount = getAssociatedTokenAddressSync(
     tokenMint,
     owner,
-    allowOwnerOffCurve
+    allowOwnerOffCurve,
+    programId,
+    ASSOCIATED_TOKEN_PROGRAM_ID
   );
 
   try {
-    await getAccount(connection, toAccount);
+    await getAccount(connection, toAccount, connection.commitment, programId);
 
     return { ataPubKey: toAccount, ix: undefined };
   } catch (e) {
@@ -111,11 +111,13 @@ export const getOrCreateATAInstruction = async (
       e instanceof TokenAccountNotFoundError ||
       e instanceof TokenInvalidAccountOwnerError
     ) {
-      const ix = createAssociatedTokenAccountInstruction(
+      const ix = createAssociatedTokenAccountIdempotentInstruction(
         payer,
         toAccount,
         owner,
-        tokenMint
+        tokenMint,
+        programId,
+        ASSOCIATED_TOKEN_PROGRAM_ID
       );
 
       return { ataPubKey: toAccount, ix };
