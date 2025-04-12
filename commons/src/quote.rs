@@ -184,7 +184,7 @@ pub fn quote_exact_in(
         calculate_transfer_fee_excluded_amount(in_mint_account, amount_in, epoch)?.amount;
 
     let mut amount_left = transfer_fee_excluded_amount_in;
-
+    let mut previous_active_bin_array_pubkey: Option<Pubkey> = None;
     while amount_left > 0 {
         let active_bin_array_pubkey = get_bin_array_pubkeys_for_swap(
             lb_pair_pubkey,
@@ -195,6 +195,13 @@ pub fn quote_exact_in(
         )?
         .pop()
         .context("Pool out of liquidity")?;
+
+        if let Some(previous_active_bin_array_pubkey) = previous_active_bin_array_pubkey {
+            if previous_active_bin_array_pubkey == active_bin_array_pubkey {
+                return Err(anyhow!("Active bin array is stuck!"));
+            }
+        }
+        previous_active_bin_array_pubkey = Some(active_bin_array_pubkey);
 
         let mut active_bin_array = bin_arrays
             .get(&active_bin_array_pubkey)
